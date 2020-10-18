@@ -112,14 +112,15 @@ class SCMInput implements ISCMInput {
 	}
 
 	showPreviousValue(): void {
-		if (!this.historyNavigator.has(this.value)) {
-			this.addToHistory(false, false);
-		}
 
 		let previous = this.historyNavigator.previous();
 
 		if (previous === this.value) {
 			previous = this.historyNavigator.previous();
+		}
+
+		if (!this.historyNavigator.has(this.value) && previous !== null) {
+			this.addToHistory(false, false);
 		}
 
 		if (previous !== null) {
@@ -128,7 +129,7 @@ class SCMInput implements ISCMInput {
 	}
 
 	private addToHistory(isCommit: boolean, isWindowReload: boolean): void {
-		let latestInput = this.historyNavigator.last();
+		let latestInput = this.historyNavigator.first();
 		if (!isCommit && !isWindowReload && latestInput !== null) {
 			this.historyNavigator.remove(latestInput);
 		}
