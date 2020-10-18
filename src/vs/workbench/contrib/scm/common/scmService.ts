@@ -100,36 +100,40 @@ class SCMInput implements ISCMInput {
 	}
 
 	showNextValue(): void {
-		if (!this.has(this.value)) {
-			this.addToHistory(false);
-		}
-
-		let next = this.historyNavigator.next();
-		if (next) {
-			if (next === this.value) {
-				next = this.historyNavigator.next();
+		if (this.historyNavigator.getHistory().length > 0) {
+			if (!this.has(this.value)) {
+				this.addToHistory(false);
 			}
-		}
 
-		if (next !== null) {
-			this.setValue(next, true);
+			let next = this.historyNavigator.next();
+			if (next) {
+				if (next === this.value) {
+					next = this.historyNavigator.next();
+				}
+			}
+
+			if (next !== null) {
+				this.setValue(next, true);
+			}
 		}
 	}
 
 	showPreviousValue(): void {
-		if (!this.has(this.value)) {
-			this.addToHistory(false);
-		}
-
-		let previous = this.historyNavigator.previous();
-		if (previous) {
-			if (previous === this.value) {
-				previous = this.historyNavigator.previous();
+		if (this.historyNavigator.getHistory().length > 0) {
+			if (!this.has(this.value)) {
+				this.addToHistory(false);
 			}
-		}
 
-		if (previous !== null) {
-			this.setValue(previous, true);
+			let previous = this.historyNavigator.previous();
+			if (previous) {
+				if (previous === this.value) {
+					previous = this.historyNavigator.previous();
+				}
+			}
+
+			if (previous !== null) {
+				this.setValue(previous, true);
+			}
 		}
 	}
 
@@ -141,11 +145,14 @@ class SCMInput implements ISCMInput {
 
 	private addToHistory(isCommit: boolean): void {
 		let latestInput = this.historyNavigator.last();
-		if (!isCommit && latestInput && latestInput !== this.value) {
+		if (latestInput !== null && this.historyNavigator.getHistory().length > 0) {
 			this.historyNavigator.remove(latestInput);
 		}
-		if (!this.has(this.value) && (isCommit || this.historyNavigator.getHistory().length > 0)) {
+		if (!this.has(this.value)) {
 			this.historyNavigator.add(this.value);
+			if (isCommit && latestInput !== null) {
+				this.historyNavigator.add(latestInput);
+			}
 		} else if (isCommit && latestInput) {
 			if (latestInput === this.value) {
 				this.historyNavigator.add(this.value);
