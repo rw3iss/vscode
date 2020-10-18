@@ -24,7 +24,7 @@ class SCMInput implements ISCMInput {
 			return;
 		}
 		if (!fromKeyboard) {
-			this.addToHistory(true, false);
+			this.addToHistory(true);
 		}
 		this._value = value;
 		this._onDidChange.fire(value);
@@ -82,7 +82,7 @@ class SCMInput implements ISCMInput {
 		const key = `scm/input:${this.repository.provider.label}:${this.repository.provider.rootUri?.path}`;
 		let history = this.storageService.get(key, StorageScope.WORKSPACE, '[]');
 		if (history) {
-			this.historyNavigator = new HistoryNavigator<string>(JSON.parse(history), 50);
+			this.historyNavigator = new HistoryNavigator(JSON.parse(history), 50);
 			let prev = this.historyNavigator.previous();
 			this.setValue(prev ? prev : '', true);
 		} else {
@@ -90,8 +90,8 @@ class SCMInput implements ISCMInput {
 		}
 		this.storageService.onWillSaveState((e) => {
 			if (e.reason == WillSaveStateReason.SHUTDOWN) {
-				if (!this.historyNavigator.has(this.value)) {
-					this.addToHistory(false, true);
+				if (!this.has(this.value)) {
+					this.addToHistory(false);
 				} else {
 					this.save();
 				}
@@ -100,14 +100,15 @@ class SCMInput implements ISCMInput {
 	}
 
 	showNextValue(): void {
-		if (!this.historyNavigator.has(this.value)) {
-			this.addToHistory(false, false);
+		if (!this.has(this.value)) {
+			this.addToHistory(false);
 		}
 
 		let next = this.historyNavigator.next();
-
-		if (next === this.value) {
-			next = this.historyNavigator.next();
+		if (next) {
+			if (next === this.value) {
+				next = this.historyNavigator.next();
+			}
 		}
 
 		if (next !== null) {
@@ -116,15 +117,15 @@ class SCMInput implements ISCMInput {
 	}
 
 	showPreviousValue(): void {
-
-		let previous = this.historyNavigator.previous();
-
-		if (previous === this.value) {
-			previous = this.historyNavigator.previous();
+		if (!this.has(this.value)) {
+			this.addToHistory(false);
 		}
 
-		if (!this.historyNavigator.has(this.value) && previous !== null) {
-			this.addToHistory(false, false);
+		let previous = this.historyNavigator.previous();
+		if (previous) {
+			if (previous === this.value) {
+				previous = this.historyNavigator.previous();
+			}
 		}
 
 		if (previous !== null) {
@@ -132,15 +133,23 @@ class SCMInput implements ISCMInput {
 		}
 	}
 
-	private addToHistory(isCommit: boolean, isWindowReload: boolean): void {
-		let latestInput = this.historyNavigator.first();
-		if (!isCommit && !isWindowReload && latestInput !== null) {
+	private has(value: string): boolean {
+		let values = this.historyNavigator.getHistory();
+		let filtered = values.filter(item => item === value);
+		return filtered.length > 0;
+	}
+
+	private addToHistory(isCommit: boolean): void {
+		let latestInput = this.historyNavigator.last();
+		if (!isCommit && latestInput && latestInput !== this.value) {
 			this.historyNavigator.remove(latestInput);
 		}
-		if (!this.historyNavigator.has(this.value)) {
+		if (!this.has(this.value) && (isCommit || this.historyNavigator.getHistory().length > 0)) {
 			this.historyNavigator.add(this.value);
-		} else if (isCommit && latestInput && latestInput === this.value) {
-			this.historyNavigator.add(this.value);
+		} else if (isCommit && latestInput) {
+			if (latestInput === this.value) {
+				this.historyNavigator.add(this.value);
+			}
 		}
 		this.save();
 	}
@@ -152,7 +161,6 @@ class SCMInput implements ISCMInput {
 		}
 	}
 }
-
 class SCMRepository implements ISCMRepository {
 
 	private _selected = false;
