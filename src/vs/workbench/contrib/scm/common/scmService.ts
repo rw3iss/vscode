@@ -89,8 +89,12 @@ class SCMInput implements ISCMInput {
 			this.historyNavigator = new HistoryNavigator<string>([], 50);
 		}
 		this.storageService.onWillSaveState((e) => {
-			if (e.reason ===  WillSaveStateReason.SHUTDOWN) {
-				this.addToHistory(false, true);
+			if (e.reason == WillSaveStateReason.SHUTDOWN) {
+				if (!this.historyNavigator.has(this.value)) {
+					this.addToHistory(false, true);
+				} else {
+					this.save();
+				}
 			}
 		});
 	}
