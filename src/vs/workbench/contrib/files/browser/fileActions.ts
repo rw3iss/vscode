@@ -12,9 +12,8 @@ import { URI } from 'vs/base/common/uri';
 import { toErrorMessage } from 'vs/base/common/errorMessage';
 import { Action } from 'vs/base/common/actions';
 import { DisposableStore, dispose, IDisposable, toDisposable } from 'vs/base/common/lifecycle';
-import { VIEWLET_ID, IExplorerService, IFilesConfiguration, VIEW_ID } from 'vs/workbench/contrib/files/common/files';
-import { ITextFileService } from 'vs/workbench/services/textfile/common/textfiles';
-import { BinarySize, IFileService, IFileStatWithMetadata, IFileStreamContent } from 'vs/platform/files/common/files';
+import { VIEWLET_ID, IFilesConfiguration, VIEW_ID } from 'vs/workbench/contrib/files/common/files';
+import { ByteSize, IFileService, IFileStatWithMetadata } from 'vs/platform/files/common/files';
 import { EditorResourceAccessor, SideBySideEditor } from 'vs/workbench/common/editor';
 import { ExplorerViewPaneContainer } from 'vs/workbench/contrib/files/browser/explorerViewlet';
 import { IQuickInputService, ItemActivation } from 'vs/platform/quickinput/common/quickInput';
@@ -22,9 +21,9 @@ import { IViewletService } from 'vs/workbench/services/viewlet/browser/viewlet';
 import { IInstantiationService, ServicesAccessor } from 'vs/platform/instantiation/common/instantiation';
 import { ITextModel } from 'vs/editor/common/model';
 import { IHostService } from 'vs/workbench/services/host/browser/host';
-import { REVEAL_IN_EXPLORER_COMMAND_ID, SAVE_ALL_COMMAND_ID, SAVE_ALL_LABEL, SAVE_ALL_IN_GROUP_COMMAND_ID } from 'vs/workbench/contrib/files/browser/fileCommands';
+import { REVEAL_IN_EXPLORER_COMMAND_ID, SAVE_ALL_COMMAND_ID, SAVE_ALL_LABEL, SAVE_ALL_IN_GROUP_COMMAND_ID, NEW_UNTITLED_FILE_COMMAND_ID } from 'vs/workbench/contrib/files/browser/fileCommands';
 import { ITextModelService, ITextModelContentProvider } from 'vs/editor/common/services/resolverService';
-import { IConfigurationService, ConfigurationTarget } from 'vs/platform/configuration/common/configuration';
+import { IConfigurationService } from 'vs/platform/configuration/common/configuration';
 import { IClipboardService } from 'vs/platform/clipboard/common/clipboardService';
 import { IModeService } from 'vs/editor/common/services/modeService';
 import { IModelService } from 'vs/editor/common/services/modelService';
@@ -43,35 +42,31 @@ import { WebFileSystemAccess, triggerDownload } from 'vs/base/browser/dom';
 import { mnemonicButtonLabel } from 'vs/base/common/labels';
 import { IFilesConfigurationService } from 'vs/workbench/services/filesConfiguration/common/filesConfigurationService';
 import { IWorkingCopyService, IWorkingCopy } from 'vs/workbench/services/workingCopy/common/workingCopyService';
-import { sequence, timeout } from 'vs/base/common/async';
+import { RunOnceWorker, sequence, timeout } from 'vs/base/common/async';
 import { IWorkingCopyFileService } from 'vs/workbench/services/workingCopy/common/workingCopyFileService';
 import { once } from 'vs/base/common/functional';
 import { Codicon } from 'vs/base/common/codicons';
 import { IViewsService } from 'vs/workbench/common/views';
 import { trim, rtrim } from 'vs/base/common/strings';
-import { IProgressService, ProgressLocation } from 'vs/platform/progress/common/progress';
+import { IProgressService, IProgressStep, ProgressLocation } from 'vs/platform/progress/common/progress';
 import { CancellationTokenSource } from 'vs/base/common/cancellation';
 import { ILogService } from 'vs/platform/log/common/log';
+import { IUriIdentityService } from 'vs/workbench/services/uriIdentity/common/uriIdentity';
+import { ResourceFileEdit } from 'vs/editor/browser/services/bulkEditService';
+import { IExplorerService } from 'vs/workbench/contrib/files/browser/files';
 
 export const NEW_FILE_COMMAND_ID = 'explorer.newFile';
 export const NEW_FILE_LABEL = nls.localize('newFile', "New File");
-
 export const NEW_FOLDER_COMMAND_ID = 'explorer.newFolder';
 export const NEW_FOLDER_LABEL = nls.localize('newFolder', "New Folder");
-
 export const TRIGGER_RENAME_LABEL = nls.localize('rename', "Rename");
-
 export const MOVE_FILE_TO_TRASH_LABEL = nls.localize('delete', "Delete");
-
 export const COPY_FILE_LABEL = nls.localize('copyFile', "Copy");
-
 export const PASTE_FILE_LABEL = nls.localize('pasteFile', "Paste");
-
 export const FileCopiedContext = new RawContextKey<boolean>('fileCopied', false);
-
 export const DOWNLOAD_LABEL = nls.localize('download', "Download...");
-
 const CONFIRM_DELETE_SETTING_KEY = 'explorer.confirmDelete';
+const MAX_UNDO_FILE_SIZE = 5000000; // 5mb
 
 function onError(notificationService: INotificationService, error: any): void {
 	if (error.message === 'string') {
@@ -122,7 +117,7 @@ export class NewFolderAction extends Action {
 	}
 }
 
-async function deleteFiles(workingCopyFileService: IWorkingCopyFileService, dialogService: IDialogService, configurationService: IConfigurationService, elements: ExplorerItem[], useTrash: boolean, skipConfirm = false): Promise<void> {
+async function deleteFiles(explorerService: IExplorerService, workingCopyFileService: IWorkingCopyFileService, dialogService: IDialogService, configurationService: IConfigurationService, elements: ExplorerItem[], useTrash: boolean, skipConfirm = false): Promise<void> {
 	let primaryButton: string;
 	if (useTrash) {
 		primaryButton = isWindows ? nls.localize('deleteButtonLabelRecycleBin', "&&Move to Recycle Bin") : nls.localize({ key: 'deleteButtonLabelTrash', comment: ['&& denotes a mnemonic'] }, "&&Move to Trash");
@@ -215,7 +210,7 @@ async function deleteFiles(workingCopyFileService: IWorkingCopyFileService, dial
 
 	// Check for confirmation checkbox
 	if (confirmation.confirmed && confirmation.checkboxChecked === true) {
-		await configurationService.updateValue(CONFIRM_DELETE_SETTING_KEY, false, ConfigurationTarget.USER);
+		await configurationService.updateValue(CONFIRM_DELETE_SETTING_KEY, false);
 	}
 
 	// Check for confirmation
@@ -225,7 +220,12 @@ async function deleteFiles(workingCopyFileService: IWorkingCopyFileService, dial
 
 	// Call function
 	try {
-		await workingCopyFileService.delete(distinctElements.map(e => e.resource), { useTrash, recursive: true });
+		const resourceFileEdits = distinctElements.map(e => new ResourceFileEdit(e.resource, undefined, { recursive: true, folder: e.isDirectory, skipTrashBin: !useTrash, maxSize: MAX_UNDO_FILE_SIZE }));
+		const options = {
+			undoLabel: distinctElements.length > 1 ? nls.localize('deleteBulkEdit', "Delete {0} files", distinctElements.length) : nls.localize('deleteFileBulkEdit', "Delete {0}", distinctElements[0].name),
+			progressLabel: distinctElements.length > 1 ? nls.localize('deletingBulkEdit', "Deleting {0} files", distinctElements.length) : nls.localize('deletingFileBulkEdit', "Deleting {0}", distinctElements[0].name),
+		};
+		await explorerService.applyBulkEdit(resourceFileEdits, options);
 	} catch (error) {
 
 		// Handle error to delete file(s) from a modal confirmation dialog
@@ -255,7 +255,7 @@ async function deleteFiles(workingCopyFileService: IWorkingCopyFileService, dial
 
 			skipConfirm = true;
 
-			return deleteFiles(workingCopyFileService, dialogService, configurationService, elements, useTrash, skipConfirm);
+			return deleteFiles(explorerService, workingCopyFileService, dialogService, configurationService, elements, useTrash, skipConfirm);
 		}
 	}
 }
@@ -471,7 +471,7 @@ export class GlobalCompareResourcesAction extends Action {
 							override: this.editorService.openEditor({
 								leftResource: activeResource,
 								rightResource: resource,
-								options: { override: false }
+								options: { override: false, pinned: true }
 							})
 						};
 					}
@@ -481,7 +481,7 @@ export class GlobalCompareResourcesAction extends Action {
 					return {
 						override: this.editorService.openEditor({
 							resource: activeResource,
-							options: { override: false }
+							options: { override: false, pinned: true }
 						})
 					};
 				}
@@ -827,7 +827,11 @@ export class CompareWithClipboardAction extends Action {
 			const name = resources.basename(resource);
 			const editorLabel = nls.localize('clipboardComparisonLabel', "Clipboard ↔ {0}", name);
 
-			await this.editorService.openEditor({ leftResource: resource.with({ scheme }), rightResource: resource, label: editorLabel }).finally(() => {
+			await this.editorService.openEditor({
+				leftResource: resource.with({ scheme }),
+				rightResource: resource, label: editorLabel,
+				options: { pinned: true }
+			}).finally(() => {
 				dispose(this.registrationDisposal);
 				this.registrationDisposal = undefined;
 			});
@@ -869,12 +873,26 @@ function onErrorWithRetry(notificationService: INotificationService, error: unkn
 async function openExplorerAndCreate(accessor: ServicesAccessor, isFolder: boolean): Promise<void> {
 	const explorerService = accessor.get(IExplorerService);
 	const fileService = accessor.get(IFileService);
-	const textFileService = accessor.get(ITextFileService);
 	const editorService = accessor.get(IEditorService);
 	const viewsService = accessor.get(IViewsService);
 	const notificationService = accessor.get(INotificationService);
+	const commandService = accessor.get(ICommandService);
 
-	await viewsService.openView(VIEW_ID, true);
+	const wasHidden = !viewsService.isViewVisible(VIEW_ID);
+	const view = await viewsService.openView(VIEW_ID, true);
+	if (wasHidden) {
+		// Give explorer some time to resolve itself #111218
+		await timeout(500);
+	}
+	if (!view) {
+		// Can happen in empty workspace case (https://github.com/microsoft/vscode/issues/100604)
+
+		if (isFolder) {
+			throw new Error('Open a folder or workspace first.');
+		}
+
+		return commandService.executeCommand(NEW_UNTITLED_FILE_COMMAND_ID);
+	}
 
 	const stats = explorerService.getContext(false);
 	const stat = stats.length > 0 ? stats[0] : undefined;
@@ -894,12 +912,18 @@ async function openExplorerAndCreate(accessor: ServicesAccessor, isFolder: boole
 
 	const onSuccess = async (value: string): Promise<void> => {
 		try {
-			const created = isFolder ? await fileService.createFolder(resources.joinPath(folder.resource, value)) : await textFileService.create(resources.joinPath(folder.resource, value));
+			const resourceToCreate = resources.joinPath(folder.resource, value);
+			await explorerService.applyBulkEdit([new ResourceFileEdit(undefined, resourceToCreate, { folder: isFolder })], {
+				progressLabel: nls.localize('newBulkEdit', "New {0}", value),
+				undoLabel: nls.localize('newBulkEdit', "New {0}", value)
+			});
 			await refreshIfSeparator(value, explorerService);
 
-			isFolder ?
-				await explorerService.select(created.resource, true) :
-				await editorService.openEditor({ resource: created.resource, options: { pinned: true } });
+			if (isFolder) {
+				await explorerService.select(resourceToCreate, true);
+			} else {
+				await editorService.openEditor({ resource: resourceToCreate, options: { pinned: true } });
+			}
 		} catch (error) {
 			onErrorWithRetry(notificationService, error, () => onSuccess(value));
 		}
@@ -933,7 +957,6 @@ CommandsRegistry.registerCommand({
 
 export const renameHandler = async (accessor: ServicesAccessor) => {
 	const explorerService = accessor.get(IExplorerService);
-	const workingCopyFileService = accessor.get(IWorkingCopyFileService);
 	const notificationService = accessor.get(INotificationService);
 
 	const stats = explorerService.getContext(false);
@@ -950,7 +973,10 @@ export const renameHandler = async (accessor: ServicesAccessor) => {
 				const targetResource = resources.joinPath(parentResource, value);
 				if (stat.resource.toString() !== targetResource.toString()) {
 					try {
-						await workingCopyFileService.move([{ source: stat.resource, target: targetResource }]);
+						await explorerService.applyBulkEdit([new ResourceFileEdit(stat.resource, targetResource)], {
+							undoLabel: nls.localize('renameBulkEdit', "Rename {0} to {1}", stat.name, value),
+							progressLabel: nls.localize('renamingBulkEdit', "Renaming {0} to {1}", stat.name, value),
+						});
 						await refreshIfSeparator(value, explorerService);
 					} catch (e) {
 						notificationService.error(e);
@@ -966,7 +992,7 @@ export const moveFileToTrashHandler = async (accessor: ServicesAccessor) => {
 	const explorerService = accessor.get(IExplorerService);
 	const stats = explorerService.getContext(true).filter(s => !s.isRoot);
 	if (stats.length) {
-		await deleteFiles(accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), stats, true);
+		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), stats, true);
 	}
 };
 
@@ -975,7 +1001,7 @@ export const deleteFileHandler = async (accessor: ServicesAccessor) => {
 	const stats = explorerService.getContext(true).filter(s => !s.isRoot);
 
 	if (stats.length) {
-		await deleteFiles(accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), stats, false);
+		await deleteFiles(accessor.get(IExplorerService), accessor.get(IWorkingCopyFileService), accessor.get(IDialogService), accessor.get(IConfigurationService), stats, false);
 	}
 };
 
@@ -1002,7 +1028,6 @@ export const DOWNLOAD_COMMAND_ID = 'explorer.download';
 const downloadFileHandler = (accessor: ServicesAccessor) => {
 	const logService = accessor.get(ILogService);
 	const fileService = accessor.get(IFileService);
-	const workingCopyFileService = accessor.get(IWorkingCopyFileService);
 	const fileDialogService = accessor.get(IFileDialogService);
 	const explorerService = accessor.get(IExplorerService);
 	const progressService = accessor.get(IProgressService);
@@ -1032,14 +1057,15 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 					return;
 				}
 
-				const maxBlobDownloadSize = 32 * BinarySize.MB; // avoid to download via blob-trick >32MB to avoid memory pressure
+				const maxBlobDownloadSize = 32 * ByteSize.MB; // avoid to download via blob-trick >32MB to avoid memory pressure
 				const preferFileSystemAccessWebApis = stat.isDirectory || stat.size > maxBlobDownloadSize;
 
 				// Folder: use FS APIs to download files and folders if available and preferred
 				if (preferFileSystemAccessWebApis && WebFileSystemAccess.supported(window)) {
 
 					interface IDownloadOperation {
-						startTime: number,
+						startTime: number;
+						progressScheduler: RunOnceWorker<IProgressStep>;
 
 						filesTotal: number;
 						filesDownloaded: number;
@@ -1048,9 +1074,15 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 						fileBytesDownloaded: number;
 					}
 
-					async function pipeContents(name: string, source: IFileStreamContent, target: WebFileSystemAccess.FileSystemWritableFileStream, operation: IDownloadOperation): Promise<void> {
+					async function downloadFileBuffered(resource: URI, target: WebFileSystemAccess.FileSystemWritableFileStream, operation: IDownloadOperation): Promise<void> {
+						const contents = await fileService.readFileStream(resource);
+						if (cts.token.isCancellationRequested) {
+							target.close();
+							return;
+						}
+
 						return new Promise<void>((resolve, reject) => {
-							const sourceStream = source.value;
+							const sourceStream = contents.value;
 
 							const disposables = new DisposableStore();
 							disposables.add(toDisposable(() => target.close()));
@@ -1066,7 +1098,7 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 							sourceStream.on('data', data => {
 								if (!disposed) {
 									target.write(data.buffer);
-									reportProgress(name, source.size, data.byteLength, operation);
+									reportProgress(contents.name, contents.size, data.byteLength, operation);
 								}
 							});
 
@@ -1082,18 +1114,34 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 						});
 					}
 
-					async function downloadFile(targetFolder: WebFileSystemAccess.FileSystemDirectoryHandle, name: string, resource: URI, operation: IDownloadOperation): Promise<void> {
+					async function downloadFileUnbuffered(resource: URI, target: WebFileSystemAccess.FileSystemWritableFileStream, operation: IDownloadOperation): Promise<void> {
+						const contents = await fileService.readFile(resource);
+						if (!cts.token.isCancellationRequested) {
+							target.write(contents.value.buffer);
+							reportProgress(contents.name, contents.size, contents.value.byteLength, operation);
+						}
+
+						target.close();
+					}
+
+					async function downloadFile(targetFolder: WebFileSystemAccess.FileSystemDirectoryHandle, file: IFileStatWithMetadata, operation: IDownloadOperation): Promise<void> {
 
 						// Report progress
 						operation.filesDownloaded++;
 						operation.fileBytesDownloaded = 0; // reset for this file
-						reportProgress(name, 0, 0, operation);
+						reportProgress(file.name, 0, 0, operation);
 
 						// Start to download
-						const targetFile = await targetFolder.getFileHandle(name, { create: true });
+						const targetFile = await targetFolder.getFileHandle(file.name, { create: true });
 						const targetFileWriter = await targetFile.createWritable();
 
-						return pipeContents(name, await fileService.readFileStream(resource), targetFileWriter, operation);
+						// For large files, write buffered using streams
+						if (file.size > ByteSize.MB) {
+							return downloadFileBuffered(file.resource, targetFileWriter, operation);
+						}
+
+						// For small files prefer to write unbuffered to reduce overhead
+						return downloadFileUnbuffered(file.resource, targetFileWriter, operation);
 					}
 
 					async function downloadFolder(folder: IFileStatWithMetadata, targetFolder: WebFileSystemAccess.FileSystemDirectoryHandle, operation: IDownloadOperation): Promise<void> {
@@ -1106,7 +1154,7 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 								}
 
 								if (child.isFile) {
-									await downloadFile(targetFolder, child.name, child.resource, operation);
+									await downloadFile(targetFolder, child, operation);
 								} else {
 									const childFolder = await targetFolder.getDirectoryHandle(child.name, { create: true });
 									const resolvedChildFolder = await fileService.resolve(child.resource, { resolveMetadata: true });
@@ -1125,26 +1173,28 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 
 						// Small file
 						let message: string;
-						if (fileSize < BinarySize.MB) {
+						if (fileSize < ByteSize.MB) {
 							if (operation.filesTotal === 1) {
 								message = name;
 							} else {
-								message = nls.localize('downloadProgressSmallMany', "{0} of {1} files ({2}/s)", operation.filesDownloaded, operation.filesTotal, BinarySize.formatSize(bytesDownloadedPerSecond));
+								message = nls.localize('downloadProgressSmallMany', "{0} of {1} files ({2}/s)", operation.filesDownloaded, operation.filesTotal, ByteSize.formatSize(bytesDownloadedPerSecond));
 							}
 						}
 
 						// Large file
 						else {
-							message = nls.localize('downloadProgressLarge', "{0} ({1} of {2}, {3}/s)", name, BinarySize.formatSize(operation.fileBytesDownloaded), BinarySize.formatSize(fileSize), BinarySize.formatSize(bytesDownloadedPerSecond));
+							message = nls.localize('downloadProgressLarge', "{0} ({1} of {2}, {3}/s)", name, ByteSize.formatSize(operation.fileBytesDownloaded), ByteSize.formatSize(fileSize), ByteSize.formatSize(bytesDownloadedPerSecond));
 						}
 
-						progress.report({ message });
+						// Report progress but limit to update only once per second
+						operation.progressScheduler.work({ message });
 					}
 
 					try {
 						const parentFolder: WebFileSystemAccess.FileSystemDirectoryHandle = await window.showDirectoryPicker();
 						const operation: IDownloadOperation = {
 							startTime: Date.now(),
+							progressScheduler: new RunOnceWorker<IProgressStep>(steps => { progress.report(steps[steps.length - 1]); }, 1000),
 
 							filesTotal: stat.isDirectory ? 0 : 1, // folders increment filesTotal within downloadFolder method
 							filesDownloaded: 0,
@@ -1157,8 +1207,10 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 							const targetFolder = await parentFolder.getDirectoryHandle(stat.name, { create: true });
 							await downloadFolder(stat, targetFolder, operation);
 						} else {
-							await downloadFile(parentFolder, stat.name, stat.resource, operation);
+							await downloadFile(parentFolder, stat, operation);
 						}
+
+						operation.progressScheduler.dispose();
 					} catch (error) {
 						logService.warn(error);
 						cts.cancel(); // `showDirectoryPicker` will throw an error when the user cancels
@@ -1184,10 +1236,8 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 			else {
 				progress.report({ message: explorerItem.name });
 
-				let defaultUri = explorerItem.isDirectory ? fileDialogService.defaultFolderPath(Schemas.file) : fileDialogService.defaultFilePath(Schemas.file);
-				if (defaultUri) {
-					defaultUri = resources.joinPath(defaultUri, explorerItem.name);
-				}
+				let defaultUri = explorerItem.isDirectory ? await fileDialogService.defaultFolderPath(Schemas.file) : await fileDialogService.defaultFilePath(Schemas.file);
+				defaultUri = resources.joinPath(defaultUri, explorerItem.name);
 
 				const destination = await fileDialogService.showSaveDialog({
 					availableFileSystems: [Schemas.file],
@@ -1197,7 +1247,10 @@ const downloadFileHandler = (accessor: ServicesAccessor) => {
 				});
 
 				if (destination) {
-					await workingCopyFileService.copy([{ source: explorerItem.resource, target: destination }], { overwrite: true });
+					await explorerService.applyBulkEdit([new ResourceFileEdit(explorerItem.resource, destination, { overwrite: true, copy: true })], {
+						undoLabel: nls.localize('downloadBulkEdit', "Download {0}", explorerItem.name),
+						progressLabel: nls.localize('downloadingBulkEdit', "Downloading {0}", explorerItem.name),
+					});
 				} else {
 					cts.cancel(); // User canceled a download. In case there were multiple files selected we should cancel the remainder of the prompts #86100
 				}
@@ -1218,10 +1271,10 @@ export const pasteFileHandler = async (accessor: ServicesAccessor) => {
 	const clipboardService = accessor.get(IClipboardService);
 	const explorerService = accessor.get(IExplorerService);
 	const fileService = accessor.get(IFileService);
-	const workingCopyFileService = accessor.get(IWorkingCopyFileService);
 	const notificationService = accessor.get(INotificationService);
 	const editorService = accessor.get(IEditorService);
 	const configurationService = accessor.get(IConfigurationService);
+	const uriIdentityService = accessor.get(IUriIdentityService);
 
 	const context = explorerService.getContext(true);
 	const toPaste = resources.distinctParents(await clipboardService.readResources(), r => r);
@@ -1238,7 +1291,7 @@ export const pasteFileHandler = async (accessor: ServicesAccessor) => {
 
 			// Find target
 			let target: ExplorerItem;
-			if (element.resource.toString() === fileToPaste.toString()) {
+			if (uriIdentityService.extUri.isEqual(element.resource, fileToPaste)) {
 				target = element.parent!;
 			} else {
 				target = element.isDirectory ? element : element.parent!;
@@ -1251,20 +1304,30 @@ export const pasteFileHandler = async (accessor: ServicesAccessor) => {
 		}));
 
 		// Move/Copy File
-		let stats: IFileStatWithMetadata[] = [];
 		if (pasteShouldMove) {
-			stats = await workingCopyFileService.move(sourceTargetPairs);
+			const resourceFileEdits = sourceTargetPairs.map(pair => new ResourceFileEdit(pair.source, pair.target));
+			const options = {
+				progressLabel: sourceTargetPairs.length > 1 ? nls.localize('movingBulkEdit', "Moving {0} files", sourceTargetPairs.length) : nls.localize('movingFileBulkEdit', "Moving {0}", resources.basenameOrAuthority(sourceTargetPairs[0].target)),
+				undoLabel: sourceTargetPairs.length > 1 ? nls.localize('moveBulkEdit', "Move {0} files", sourceTargetPairs.length) : nls.localize('moveFileBulkEdit', "Move {0}", resources.basenameOrAuthority(sourceTargetPairs[0].target))
+			};
+			await explorerService.applyBulkEdit(resourceFileEdits, options);
 		} else {
-			stats = await workingCopyFileService.copy(sourceTargetPairs);
+			const resourceFileEdits = sourceTargetPairs.map(pair => new ResourceFileEdit(pair.source, pair.target, { copy: true }));
+			const options = {
+				progressLabel: sourceTargetPairs.length > 1 ? nls.localize('copyingBulkEdit', "Copying {0} files", sourceTargetPairs.length) : nls.localize('copyingFileBulkEdit', "Copying {0}", resources.basenameOrAuthority(sourceTargetPairs[0].target)),
+				undoLabel: sourceTargetPairs.length > 1 ? nls.localize('copyBulkEdit', "Copy {0} files", sourceTargetPairs.length) : nls.localize('copyFileBulkEdit', "Copy {0}", resources.basenameOrAuthority(sourceTargetPairs[0].target))
+			};
+			await explorerService.applyBulkEdit(resourceFileEdits, options);
 		}
 
-		if (stats.length >= 1) {
-			const stat = stats[0];
-			if (stat && !stat.isDirectory && stats.length === 1) {
-				await editorService.openEditor({ resource: stat.resource, options: { pinned: true, preserveFocus: true } });
-			}
-			if (stat) {
-				await explorerService.select(stat.resource);
+		if (sourceTargetPairs.length >= 1) {
+			const pair = sourceTargetPairs[0];
+			await explorerService.select(pair.target);
+			if (sourceTargetPairs.length === 1) {
+				const item = explorerService.findClosest(pair.target);
+				if (item && !item.isDirectory) {
+					await editorService.openEditor({ resource: item.resource, options: { pinned: true, preserveFocus: true } });
+				}
 			}
 		}
 	} catch (e) {

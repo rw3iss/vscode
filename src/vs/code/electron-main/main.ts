@@ -44,7 +44,6 @@ import { FileService } from 'vs/platform/files/common/fileService';
 import { DiskFileSystemProvider } from 'vs/platform/files/node/diskFileSystemProvider';
 import { Schemas } from 'vs/base/common/network';
 import { IFileService } from 'vs/platform/files/common/files';
-import { IStorageKeysSyncRegistryService, StorageKeysSyncRegistryService } from 'vs/platform/userDataSync/common/storageKeys';
 import { ITunnelService } from 'vs/platform/remote/common/tunnel';
 import { TunnelService } from 'vs/platform/remote/node/tunnelService';
 import { IProductService } from 'vs/platform/product/common/productService';
@@ -169,7 +168,6 @@ class CodeMain {
 		services.set(IRequestService, new SyncDescriptor(RequestMainService));
 		services.set(IThemeMainService, new SyncDescriptor(ThemeMainService));
 		services.set(ISignService, new SyncDescriptor(SignService));
-		services.set(IStorageKeysSyncRegistryService, new SyncDescriptor(StorageKeysSyncRegistryService));
 		services.set(IProductService, { _serviceBrand: undefined, ...product });
 		services.set(ITunnelService, new SyncDescriptor(TunnelService));
 
@@ -202,7 +200,7 @@ class CodeMain {
 			VSCODE_IPC_HOOK: environmentService.mainIPCHandle
 		};
 
-		['VSCODE_NLS_CONFIG', 'VSCODE_LOGS', 'VSCODE_PORTABLE'].forEach(key => {
+		['VSCODE_NLS_CONFIG', 'VSCODE_PORTABLE'].forEach(key => {
 			const value = process.env[key];
 			if (typeof value === 'string') {
 				instanceEnvironment[key] = value;
@@ -345,15 +343,7 @@ class CodeMain {
 
 	private handleStartupDataDirError(environmentService: IEnvironmentMainService, error: NodeJS.ErrnoException): void {
 		if (error.code === 'EACCES' || error.code === 'EPERM') {
-			const directories = [environmentService.userDataPath];
-
-			if (environmentService.extensionsPath) {
-				directories.push(environmentService.extensionsPath);
-			}
-
-			if (XDG_RUNTIME_DIR) {
-				directories.push(XDG_RUNTIME_DIR);
-			}
+			const directories = coalesce([environmentService.userDataPath, environmentService.extensionsPath, XDG_RUNTIME_DIR]);
 
 			this.showStartupWarningDialog(
 				localize('startupDataDirError', "Unable to write program user data."),
